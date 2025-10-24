@@ -1,19 +1,18 @@
 # =====================================
-# Streamlit App: 人事用“提成项目”起租提成审核（更新版）
+# Streamlit App: 人事用“提成项目” + “二次明细” 审核系统
 # =====================================
 
 import streamlit as st
 import pandas as pd
-from openpyxl import load_workbook, Workbook
+from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from io import BytesIO
-import time
 
-st.title("📊 人事用审核工具：起租提成表自动检查（更新版）")
+st.title("📊 人事用审核工具：提成项目与二次明细自动检查")
 
-# 上传文件
+# ========== 上传文件 ==========
 uploaded_files = st.file_uploader(
-    "请上传原始数据表（提成项目、二次明细、放款明细、产品台账）",
+    "请上传原始数据表（提成项目、二次明细、放款明细、本司sheet、产品台账）",
     type="xlsx", accept_multiple_files=True
 )
 
@@ -23,9 +22,8 @@ if not uploaded_files or len(uploaded_files) < 4:
 else:
     st.success("✅ 文件上传完成")
 
-# -------------------------
-# 工具函数
-# -------------------------
+
+# ========== 工具函数 ==========
 def find_file(files_list, keyword):
     for f in files_list:
         if keyword in f.name:
@@ -106,7 +104,7 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
             if diff > ignore_tol:
                 errors = 1
         else:
-            if str(main_num).strip()!=str(ref_val).strip():
+            if str(main_num).strip()!=str(ref_num).strip():
                 errors = 1
 
     if errors:
@@ -115,138 +113,103 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
         ws.cell(excel_row, col_idx).fill = red_fill
     return errors
 
-# -------------------------
-# 读取文件
-# -------------------------
-main_file = find_file(uploaded_files, "提成项目")
-ec_file = find_file(uploaded_files, "二次明细")
-fk_file = find_file(uploaded_files, "放款明细")
-product_file = find_file(uploaded_files, "产品台账")
 
-# 起租提成sheet
-xls_main = pd.ExcelFile(main_file)
-main_sheet = find_sheet(xls_main, "起租提成")
-main_df = pd.read_excel(xls_main, sheet_name=main_sheet, header=1)
+# ========== 通用审核函数 ==========
+def audit_sheet(main_file, sheet_keyword, ec_df, fk_df, product_df):
+    """对主文件中指定sheet执行审核逻辑"""
+    xls_main = pd.ExcelFile(main_file)
+    main_sheet = find_sheet(xls_main, sheet_keyword)
+    main_df = pd.read_excel(xls_main, sheet_name=main_sheet, header=1)
 
-# 原始数据
-ec_df = pd.read_excel(ec_file)
-fk_xls = pd.ExcelFile(fk_file)
+    # 合同号列
+    global contract_col_main
+    contract_col_main = find_col(main_df, "合同")
+    contract_col_ec = find_col(ec_df, "合同")
+    contract_col_fk = find_col(fk_df, "合同")
+    contract_col_product = find_col(product_df, "合同")
 
-# 🆕 改为自动寻找包含“提成”的sheet
-fk_ticheng_sheet = find_sheet(fk_xls, "提成")
-fk_df = pd.read_excel(fk_xls, sheet_name=fk_ticheng_sheet)
+    # 映射配置
+    mappings = [
+        ("起租日期", ["起租日_商","起租日_商"], 0),
+        ("租赁本金", ["租赁本金"], 0),
+        ("收益率", ["XIRR_商_起租"], 0.005)
+    ]
 
-# 🆕 新增包含“经理”的sheet
-fk_manager_sheet = find_sheet(fk_xls, "经理")
-manager_df = pd.read_excel(fk_xls, sheet_name=fk_manager_sheet)
+    wb = Workbook()
+    ws = wb.active
+    for c_idx, col_name in enumerate(main_df.columns, start=1):
+        ws.cell(1,c_idx,col_name)
 
-product_df = pd.read_excel(product_file)
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
-# 合同号列
-contract_col_main = find_col(main_df, "合同")
-contract_col_ec = find_col(ec_df, "合同")
-contract_col_fk = find_col(fk_df, "合同")
-contract_col_product = find_col(product_df, "合同")
-contract_col_manager = find_col(manager_df, "合同")
+    total_errors = 0
+    n_rows = len(main_df)
 
-# -------------------------
-# 映射配置（新增“年限” vs “租赁期限”）
-# -------------------------
-mappings = [
-    ("起租日期", ["起租日_商","起租日_商"], 0),   # 二次明细 & 产品台账
-    ("租赁本金", ["租赁本金"], 0),                 # 放款明细
-    ("收益率", ["XIRR_商_起租"], 0.005),           # 产品台账
-    ("年限", ["租赁期限"], 0),                    # 🆕 提成sheet
-]
+    # Streamlit进度显示
+    progress = st.progress(0)
+    status_text = st.empty()
+    st.info(f"开始审核 sheet：{sheet_keyword}")
 
-# -------------------------
-# Excel输出初始化
-# -------------------------
-output_path = "起租提成_审核标注版.xlsx"
-wb = Workbook()
-ws = wb.active
+    for idx,row in main_df.iterrows():
+        contract_no = str(row.get(contract_col_main)).strip()
+        if pd.isna(contract_no) or contract_no in ["","nan"]:
+            continue
+        
+        # 比对每个字段
+        for main_kw, ref_kws, tol in mappings:
+            for ref_kw, ref_df, ref_contract_col in zip(
+                ref_kws,
+                [ec_df, product_df] if main_kw=="起租日期" else [fk_df] if main_kw=="租赁本金" else [product_df],
+                [contract_col_ec, contract_col_product] if main_kw=="起租日期" else [contract_col_fk] if main_kw=="租赁本金" else [contract_col_product]
+            ):
+                total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,ref_contract_col,ws,red_fill,tol)
+        
+        progress.progress((idx+1)/n_rows)
+        if (idx+1)%10==0 or idx+1==n_rows:
+            status_text.text(f"{sheet_keyword} 审核进度：{idx+1}/{n_rows} 行")
 
-for c_idx, col_name in enumerate(main_df.columns, start=1):
-    ws.cell(1, c_idx, col_name)
+    # 标黄合同号列 + 写入原数据
+    contract_col_idx_excel = list(main_df.columns).index(contract_col_main)+1
+    for row_idx in range(len(main_df)):
+        excel_row = row_idx+3
+        has_red = any(ws.cell(excel_row,c).fill==red_fill for c in range(1,len(main_df.columns)+1))
+        if has_red:
+            ws.cell(excel_row,contract_col_idx_excel).fill = yellow_fill
+        for c_idx, val in enumerate(main_df.iloc[row_idx], start=1):
+            ws.cell(excel_row,c_idx,val)
 
-red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+    output_stream = BytesIO()
+    wb.save(output_stream)
+    output_stream.seek(0)
 
-# -------------------------
-# 循环检查
-# -------------------------
-total_errors = 0
-contracts_seen = set()
+    st.success(f"✅ {sheet_keyword} 审核完成，共发现 {total_errors} 处错误")
+    st.download_button(
+        label=f"📥 下载 {sheet_keyword} 审核标注版",
+        data=output_stream,
+        file_name=f"{sheet_keyword}_审核标注版.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
 
-progress = st.progress(0)
-status_text = st.empty()
-n_rows = len(main_df)
 
-for idx, row in main_df.iterrows():
-    contract_no = str(row.get(contract_col_main)).strip()
-    if pd.isna(contract_no) or contract_no in ["","nan"]:
-        continue
-    contracts_seen.add(contract_no)
-    
-    # 比对字段
-    for main_kw, ref_kws, tol in mappings:
-        for ref_kw, ref_df, ref_contract_col in zip(
-            ref_kws,
-            [ec_df, product_df] if main_kw=="起租日期" else
-            [fk_df] if main_kw in ["租赁本金","年限"] else
-            [product_df],
-            [contract_col_ec, contract_col_product] if main_kw=="起租日期" else
-            [contract_col_fk] if main_kw in ["租赁本金","年限"] else
-            [contract_col_product]
-        ):
-            total_errors += compare_and_mark(
-                idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col, ws, red_fill, tol
-            )
+# ========== 执行两次审核 ==========
+try:
+    main_file = find_file(uploaded_files, "提成项目")
+    ec_file = find_file(uploaded_files, "二次明细")
+    fk_file = find_file(uploaded_files, "放款明细")
+    product_file = find_file(uploaded_files, "产品台账")
 
-    # 🆕 检查操作人与客户经理匹配
-    op_col = find_col(fk_df, "操作人")
-    mgr_col = find_col(manager_df, "客户经理")
-    if op_col and mgr_col:
-        op_val = fk_df.loc[fk_df[contract_col_fk].astype(str).str.strip()==contract_no, op_col]
-        mgr_val = manager_df.loc[manager_df[contract_col_manager].astype(str).str.strip()==contract_no, mgr_col]
-        if not op_val.empty and not mgr_val.empty:
-            if str(op_val.iloc[0]).strip() != str(mgr_val.iloc[0]).strip():
-                excel_row = idx + 3
-                op_main_col = find_col(main_df, "操作人")
-                if op_main_col:
-                    col_idx = list(main_df.columns).index(op_main_col) + 1
-                    ws.cell(excel_row, col_idx).fill = red_fill
-                total_errors += 1
+    ec_df = pd.read_excel(ec_file)
+    fk_xls = pd.ExcelFile(fk_file)
+    fk_df = pd.read_excel(fk_xls, sheet_name=find_sheet(fk_xls,"本司"))
+    product_df = pd.read_excel(product_file)
 
-    progress.progress((idx+1)/n_rows)
-    if (idx+1) % 10 == 0 or idx+1 == n_rows:
-        status_text.text(f"正在检查... {idx+1}/{n_rows} 行")
+    # 1️⃣ 审核提成项目 → 起租提成
+    audit_sheet(main_file, "起租提成", ec_df, fk_df, product_df)
 
-# -------------------------
-# 标黄合同号列 & 写入数据
-# -------------------------
-contract_col_idx_excel = list(main_df.columns).index(contract_col_main)+1
-for row_idx in range(len(main_df)):
-    excel_row = row_idx+3
-    has_red = any(ws.cell(excel_row,c).fill==red_fill for c in range(1,len(main_df.columns)+1))
-    if has_red:
-        ws.cell(excel_row, contract_col_idx_excel).fill = yellow_fill
-    # 写入原数据
-    for c_idx, val in enumerate(main_df.iloc[row_idx], start=1):
-        ws.cell(excel_row, c_idx, val)
+    st.divider()
+    # 2️⃣ 审核二次sheet
+    audit_sheet(main_file, "二次", ec_df, fk_df, product_df)
 
-# -------------------------
-# 导出Excel
-# -------------------------
-output_stream = BytesIO()
-wb.save(output_stream)
-output_stream.seek(0)
-
-st.download_button(
-    label="📥 下载起租提成审核标注版",
-    data=output_stream,
-    file_name="起租提成_审核标注版.xlsx",
-    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-)
-
-st.success(f"✅ 审核完成，共发现 {total_errors} 处错误")
+except Exception as e:
+    st.error(f"❌ 程序运行出错：{e}")
