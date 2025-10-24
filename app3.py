@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from io import BytesIO
 
-st.title("📊 人事用审核工具：起租提成、二次提成 & 平台工表自动检查")
+st.title("📊 人事用审核工具：起租提成 & 二次提成 & 平台工表自动检查")
 
 # ========== 上传文件 ==========
 uploaded_files = st.file_uploader(
@@ -65,7 +65,6 @@ def same_date_ymd(a,b):
         return False
 
 def detect_header_row(file, sheet_name):
-    """自动检测表头行位置"""
     preview = pd.read_excel(file, sheet_name=sheet_name, nrows=2, header=None)
     first_row = preview.iloc[0]
     total_cells = len(first_row)
@@ -79,12 +78,11 @@ def detect_header_row(file, sheet_name):
     return 0
 
 def get_header_row(file, sheet_name):
-    """起租/二次 sheet 固定跳过首行备注，其他 sheet 自动检测"""
     if any(k in sheet_name for k in ["起租", "二次"]):
         return 1
     return detect_header_row(file, sheet_name)
 
-def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col, ws, red_fill, ignore_tol=0):
+def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col, ws, red_fill, contract_col_main, ignore_tol=0):
     errors = 0
     main_col = find_col(main_df, main_kw)
     ref_col = find_col(ref_df, ref_kw)
@@ -95,7 +93,7 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
     if pd.isna(contract_no) or contract_no in ["", "nan"]:
         return 0
 
-    ref_rows = ref_df[ref_df[ref_contract_col].astype(str).str.strip() == contract_no]
+    ref_rows = ref_df[ref_df[ref_contract_col].astype(str).str.strip()==contract_no]
     if ref_rows.empty:
         return 0
 
@@ -119,7 +117,7 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
                 errors = 1
 
     if errors:
-        excel_row = idx + 2 + header_row  # 自动适配 header 行
+        excel_row = idx + 2 + header_offset  # 动态适配header行
         col_idx = list(main_df.columns).index(main_col) + 1
         ws.cell(excel_row, col_idx).fill = red_fill
     return errors
@@ -141,9 +139,10 @@ contract_col_product = find_col(product_df, "合同")
 
 # ========== 核心审核函数 ==========
 def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
-    global header_row
     xls_main = pd.ExcelFile(main_file)
+    global header_offset
     header_row = get_header_row(main_file, sheet_name)
+    header_offset = header_row
     main_df = pd.read_excel(xls_main, sheet_name=sheet_name, header=header_row)
     st.write(f"📘 正在审核：{sheet_name}（header={header_row}）")
 
@@ -182,7 +181,7 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
                 [ec_df, product_df] if main_kw=="起租日期" else [fk_df] if main_kw=="租赁本金" else [product_df],
                 [contract_col_ec, contract_col_product] if main_kw=="起租日期" else [contract_col_fk] if main_kw=="租赁本金" else [contract_col_product]
             ):
-                total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,ref_contract_col,ws,red_fill,tol)
+                total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,ref_contract_col,ws,red_fill,contract_col_main,tol)
 
         progress.progress((idx+1)/n_rows)
         if (idx+1)%10==0 or idx+1==n_rows:
@@ -191,7 +190,7 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
     # 标黄合同号列 & 写入数据
     contract_col_idx_excel = list(main_df.columns).index(contract_col_main)+1
     for row_idx in range(len(main_df)):
-        excel_row = row_idx + 2 + header_row
+        excel_row = row_idx + 2 + header_offset
         has_red = any(ws.cell(excel_row,c).fill==red_fill for c in range(1,len(main_df.columns)+1))
         if has_red:
             ws.cell(excel_row,contract_col_idx_excel).fill = yellow_fill
@@ -214,10 +213,10 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
 
 # ========== 执行审核 ==========
 xls_main = pd.ExcelFile(main_file)
-target_sheets = [s for s in xls_main.sheet_names if any(k in s for k in ["起租", "二次", "平台工"])]
+target_sheets = [s for s in xls_main.sheet_names if any(k in s for k in ["起租","二次","平台工"])]
 
 if not target_sheets:
-    st.warning("⚠️ 未找到包含 '起租'、'二次' 或 '平台工' 的sheet。")
+    st.warning("⚠️ 未找到目标 sheet。")
 else:
     for sheet_name in target_sheets:
         audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df)
