@@ -80,7 +80,7 @@ def detect_header_row(file, sheet_name):
 
 def get_header_row(file, sheet_name):
     """白名单优先：已知某些表固定header=1"""
-    if any(k in sheet_name for k in ["起租", "二次", "平台工"]):
+    if any(k in sheet_name for k in ["起租", "二次"]):
         return 1
     return detect_header_row(file, sheet_name)
 
