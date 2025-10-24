@@ -1,6 +1,5 @@
-# ===================================== 
-# Streamlit App: 人事用“提成项目 & 二次项目 & 平台工”自动审核（多sheet版） 
-# 输出 Excel 自动适配原始表头
+# =====================================
+# Streamlit App: 人事用多sheet提成审核（自动适配header）
 # =====================================
 
 import streamlit as st
@@ -9,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from io import BytesIO
 
-st.title("📊 人事用审核工具：多sheet自动检查（起租、二次、平台工）")
+st.title("📊 人事用审核工具：多sheet提成自动检查")
 
 # ========== 上传文件 ==========
 uploaded_files = st.file_uploader(
@@ -81,11 +80,13 @@ def detect_header_row(file, sheet_name):
 
 def get_header_row(file, sheet_name):
     """白名单优先：已知某些表固定header=1"""
-    if any(k in sheet_name for k in ["起租", "二次"]):
+    if any(k in sheet_name for k in ["起租", "二次", "平台工"]):
         return 1
     return detect_header_row(file, sheet_name)
 
-def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col, ws, red_fill, ignore_tol=0):
+def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col, ws, red_fill, ignore_tol=0, contract_col_main=None):
+    if contract_col_main is None:
+        return 0
     errors = 0
     main_col = find_col(main_df, main_kw)
     ref_col = find_col(ref_df, ref_kw)
@@ -120,7 +121,7 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
                 errors = 1
 
     if errors:
-        excel_row = idx + 2 + header_row  # 自动适配 header
+        excel_row = idx + 2  # 从第二行开始写列名，无空行
         col_idx = list(main_df.columns).index(main_col) + 1
         ws.cell(excel_row, col_idx).fill = red_fill
     return errors
@@ -142,7 +143,6 @@ contract_col_product = find_col(product_df, "合同")
 
 # ========== 核心审核函数 ==========
 def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
-    global header_row
     xls_main = pd.ExcelFile(main_file)
     header_row = get_header_row(main_file, sheet_name)
     main_df = pd.read_excel(xls_main, sheet_name=sheet_name, header=header_row)
@@ -161,9 +161,8 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
 
     wb = Workbook()
     ws = wb.active
-    # 写入列名，自动适配 header_row
     for c_idx, col_name in enumerate(main_df.columns, start=1):
-        ws.cell(1 + header_row, c_idx, col_name)
+        ws.cell(1, c_idx, col_name)
 
     red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
     yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
@@ -184,7 +183,10 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
                 [ec_df, product_df] if main_kw=="起租日期" else [fk_df] if main_kw=="租赁本金" else [product_df],
                 [contract_col_ec, contract_col_product] if main_kw=="起租日期" else [contract_col_fk] if main_kw=="租赁本金" else [contract_col_product]
             ):
-                total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,ref_contract_col,ws,red_fill,tol)
+                total_errors += compare_and_mark(
+                    idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col, ws, red_fill, tol,
+                    contract_col_main=contract_col_main
+                )
 
         progress.progress((idx+1)/n_rows)
         if (idx+1)%10==0 or idx+1==n_rows:
@@ -193,7 +195,7 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
     # 标黄合同号列 & 写入数据
     contract_col_idx_excel = list(main_df.columns).index(contract_col_main)+1
     for row_idx in range(len(main_df)):
-        excel_row = row_idx + 2 + header_row
+        excel_row = row_idx + 2  # 与写入红格保持一致
         has_red = any(ws.cell(excel_row,c).fill==red_fill for c in range(1,len(main_df.columns)+1))
         if has_red:
             ws.cell(excel_row,contract_col_idx_excel).fill = yellow_fill
@@ -216,8 +218,7 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
 
 # ========== 执行审核 ==========
 xls_main = pd.ExcelFile(main_file)
-# 目标 sheet: 起租、二次、平台工
-target_sheets = [s for s in xls_main.sheet_names if any(k in s for k in ["起租","二次","平台工"])]
+target_sheets = [s for s in xls_main.sheet_names if any(k in s for k in ["起租", "二次", "平台工"])]
 
 if not target_sheets:
     st.warning("⚠️ 未找到包含 '起租'、'二次' 或 '平台工' 的sheet。")
