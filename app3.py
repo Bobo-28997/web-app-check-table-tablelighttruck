@@ -222,10 +222,7 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df):
         "收益率": [
             (product_df, "XIRR_商_起租", contract_col_product, 1, 0.005),
         ],
-        # 支持主表字段为 "年限" 或 "租赁期限"
-        "年限": [
-            (manager_df, "租赁期限", contract_col_mgr, 12, 0),  # 经理表年 -> 乘12
-        ],
+        # 经理表年 -> 乘12
         "租赁期限": [
             (manager_df, "租赁期限", contract_col_mgr, 12, 0),
         ]
