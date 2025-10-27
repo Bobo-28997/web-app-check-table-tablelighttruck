@@ -1,5 +1,5 @@
 # =====================================
-# Streamlit App: 人事用“提成项目 & 二次项目 & 平台工”自动审核（多sheet版）
+# Streamlit App: 人事用“提成项目 & 二次项目 & 平台工”自动审核（含经理租赁期限比对）
 # =====================================
 
 import streamlit as st
@@ -8,7 +8,7 @@ from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from io import BytesIO
 
-st.title("📊 人事用审核工具：起租提成 & 二次提成 & 平台工表自动检查")
+st.title("📊 人事用审核工具：起租提成 & 二次提成 & 平台工表自动检查（含经理租赁期限校验）")
 
 # ========== 上传文件 ==========
 uploaded_files = st.file_uploader(
@@ -82,7 +82,9 @@ def get_header_row(file, sheet_name):
         return 1
     return detect_header_row(file, sheet_name)
 
-def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col, ws, red_fill, contract_col_main, ignore_tol=0):
+# ========== 比对核心函数 ==========
+def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col,
+                     ws, red_fill, contract_col_main, ignore_tol=0, multiplier=1):
     errors = 0
     main_col = find_col(main_df, main_kw)
     ref_col = find_col(ref_df, ref_kw)
@@ -103,7 +105,19 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
     if pd.isna(main_val) and pd.isna(ref_val):
         return 0
 
-    if "日期" in main_kw or "日期" in ref_kw:
+    # ==== 租赁期限特殊处理 ====
+    if "租赁期限" in main_kw:
+        ref_val = normalize_num(ref_val)
+        main_val = normalize_num(main_val)
+        if isinstance(ref_val, (int, float)):
+            ref_val = ref_val * multiplier  # 将年转为月
+        if isinstance(main_val, (int, float)) and isinstance(ref_val, (int, float)):
+            if abs(main_val - ref_val) > 0.5:  # 容许0.5月误差
+                errors = 1
+        else:
+            if str(main_val).strip() != str(ref_val).strip():
+                errors = 1
+    elif "日期" in main_kw or "日期" in ref_kw:
         if not same_date_ymd(main_val, ref_val):
             errors = 1
     else:
@@ -117,7 +131,7 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
                 errors = 1
 
     if errors:
-        excel_row = idx + 2 + header_offset  # 动态适配header行
+        excel_row = idx + 2 + header_offset
         col_idx = list(main_df.columns).index(main_col) + 1
         ws.cell(excel_row, col_idx).fill = red_fill
     return errors
@@ -130,15 +144,20 @@ product_file = find_file(uploaded_files, "产品台账")
 
 ec_df = pd.read_excel(ec_file)
 fk_xls = pd.ExcelFile(fk_file)
+
+# 主放款表与经理表
 fk_df = pd.read_excel(fk_xls, sheet_name=[s for s in fk_xls.sheet_names if "本司" in s][0])
+manager_df = pd.read_excel(fk_xls, sheet_name=[s for s in fk_xls.sheet_names if "经理" in s][0])
+
 product_df = pd.read_excel(product_file)
 
 contract_col_ec = find_col(ec_df, "合同")
 contract_col_fk = find_col(fk_df, "合同")
+contract_col_mgr = find_col(manager_df, "合同")
 contract_col_product = find_col(product_df, "合同")
 
-# ========== 核心审核函数 ==========
-def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
+# ========== 审核函数 ==========
+def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df):
     xls_main = pd.ExcelFile(main_file)
     global header_offset
     header_row = get_header_row(main_file, sheet_name)
@@ -152,9 +171,10 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
         return None, 0
 
     mappings = [
-        ("起租日期", ["起租日_商","起租日_商"], 0),
+        ("起租日期", ["起租日_商"], 0),
         ("租赁本金", ["租赁本金"], 0),
-        ("收益率", ["XIRR_商_起租"], 0.005)
+        ("收益率", ["XIRR_商_起租"], 0.005),
+        ("租赁期限", ["租赁期限"], 0)  # 新增租赁期限比对
     ]
 
     wb = Workbook()
@@ -171,23 +191,28 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df):
     status = st.empty()
 
     for idx, row in main_df.iterrows():
-        contract_no = str(row.get(contract_col_main)).strip()
-        if pd.isna(contract_no) or contract_no in ["", "nan"]:
-            continue
-
         for main_kw, ref_kws, tol in mappings:
-            for ref_kw, ref_df, ref_contract_col in zip(
+            for ref_kw, ref_df, ref_contract_col, mult in zip(
                 ref_kws,
-                [ec_df, product_df] if main_kw=="起租日期" else [fk_df] if main_kw=="租赁本金" else [product_df],
-                [contract_col_ec, contract_col_product] if main_kw=="起租日期" else [contract_col_fk] if main_kw=="租赁本金" else [contract_col_product]
+                [ec_df, fk_df, product_df, manager_df],
+                [contract_col_ec, contract_col_fk, contract_col_product, contract_col_mgr],
+                [1, 1, 1, 12]  # 经理表乘12月
             ):
-                total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,ref_contract_col,ws,red_fill,contract_col_main,tol)
+                # 只在租赁期限时使用manager_df
+                if "租赁期限" in main_kw and ref_df is manager_df:
+                    total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,
+                                                     ref_contract_col,ws,red_fill,
+                                                     contract_col_main,tol,mult)
+                elif "租赁期限" not in main_kw and ref_df is not manager_df:
+                    total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,
+                                                     ref_contract_col,ws,red_fill,
+                                                     contract_col_main,tol,1)
 
         progress.progress((idx+1)/n_rows)
         if (idx+1)%10==0 or idx+1==n_rows:
             status.text(f"{sheet_name}：{idx+1}/{n_rows} 行")
 
-    # 标黄合同号列 & 写入数据
+    # 标黄合同号列
     contract_col_idx_excel = list(main_df.columns).index(contract_col_main)+1
     for row_idx in range(len(main_df)):
         excel_row = row_idx + 2 + header_offset
@@ -219,4 +244,4 @@ if not target_sheets:
     st.warning("⚠️ 未找到目标 sheet。")
 else:
     for sheet_name in target_sheets:
-        audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df)
+        audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df)
