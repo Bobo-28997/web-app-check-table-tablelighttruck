@@ -60,6 +60,7 @@ def same_date_ymd(a,b):
         db = pd.to_datetime(b, errors='coerce')
         if pd.isna(da) or pd.isna(db):
             return False
+        # 仅比较年月日，忽略小时分钟
         return (da.year==db.year) and (da.month==db.month) and (da.day==db.day)
     except:
         return False
@@ -83,8 +84,16 @@ def get_header_row(file, sheet_name):
     return detect_header_row(file, sheet_name)
 
 # ========== 比对核心函数 ==========
-def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col,
-                     ws, red_fill, contract_col_main, ignore_tol=0, multiplier=1):
+def compare_and_mark(
+    idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col,
+    ws, red_fill, contract_col_main, ignore_tol=0, multiplier=1
+):
+    """
+    逻辑说明：
+    - 若为“租赁期限”，允许0.5月误差；
+    - 若为“日期”类字段，只比年月日；
+    - 其他字段严格按 ignore_tol 比较。
+    """
     errors = 0
     main_col = find_col(main_df, main_kw)
     ref_col = find_col(ref_df, ref_kw)
@@ -95,7 +104,7 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
     if pd.isna(contract_no) or contract_no in ["", "nan"]:
         return 0
 
-    ref_rows = ref_df[ref_df[ref_contract_col].astype(str).str.strip()==contract_no]
+    ref_rows = ref_df[ref_df[ref_contract_col].astype(str).str.strip() == contract_no]
     if ref_rows.empty:
         return 0
 
@@ -105,31 +114,36 @@ def compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_co
     if pd.isna(main_val) and pd.isna(ref_val):
         return 0
 
-    # ==== 租赁期限特殊处理 ====
+    # ==== 1️⃣ 租赁期限特殊处理 ====
     if "租赁期限" in main_kw:
         ref_val = normalize_num(ref_val)
         main_val = normalize_num(main_val)
         if isinstance(ref_val, (int, float)):
             ref_val = ref_val * multiplier  # 将年转为月
         if isinstance(main_val, (int, float)) and isinstance(ref_val, (int, float)):
-            if abs(main_val - ref_val) > 0.5:  # 容许0.5月误差
+            if abs(main_val - ref_val) > 0.5:  # 仅租赁期限允许±0.5月
                 errors = 1
         else:
             if str(main_val).strip() != str(ref_val).strip():
                 errors = 1
+
+    # ==== 2️⃣ 日期类字段 ====
     elif "日期" in main_kw or "日期" in ref_kw:
         if not same_date_ymd(main_val, ref_val):
             errors = 1
+
+    # ==== 3️⃣ 其他字段 ====
     else:
         main_num = normalize_num(main_val)
         ref_num = normalize_num(ref_val)
-        if isinstance(main_num,(int,float)) and isinstance(ref_num,(int,float)):
+        if isinstance(main_num, (int, float)) and isinstance(ref_num, (int, float)):
             if abs(main_num - ref_num) > ignore_tol:
                 errors = 1
         else:
-            if str(main_num).strip() != str(ref_num).strip():
+            if str(main_num).strip() != str(ref_val).strip():
                 errors = 1
 
+    # ==== 标红 ====
     if errors:
         excel_row = idx + 2 + header_offset
         col_idx = list(main_df.columns).index(main_col) + 1
@@ -148,9 +162,9 @@ fk_xls = pd.ExcelFile(fk_file)
 # 主放款表与经理表
 fk_df = pd.read_excel(fk_xls, sheet_name=[s for s in fk_xls.sheet_names if "本司" in s][0])
 manager_df = pd.read_excel(fk_xls, sheet_name=[s for s in fk_xls.sheet_names if "经理" in s][0])
-
 product_df = pd.read_excel(product_file)
 
+# 找合同列
 contract_col_ec = find_col(ec_df, "合同")
 contract_col_fk = find_col(fk_df, "合同")
 contract_col_mgr = find_col(manager_df, "合同")
@@ -174,7 +188,7 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df):
         ("起租日期", ["起租日_商"], 0),
         ("租赁本金", ["租赁本金"], 0),
         ("收益率", ["XIRR_商_起租"], 0.005),
-        ("租赁期限", ["租赁期限"], 0)  # 新增租赁期限比对
+        ("租赁期限", ["租赁期限"], 0)
     ]
 
     wb = Workbook()
@@ -198,15 +212,14 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df):
                 [contract_col_ec, contract_col_fk, contract_col_product, contract_col_mgr],
                 [1, 1, 1, 12]  # 经理表乘12月
             ):
-                # 只在租赁期限时使用manager_df
                 if "租赁期限" in main_kw and ref_df is manager_df:
-                    total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,
-                                                     ref_contract_col,ws,red_fill,
-                                                     contract_col_main,tol,mult)
+                    total_errors += compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw,
+                                                     ref_contract_col, ws, red_fill,
+                                                     contract_col_main, tol, mult)
                 elif "租赁期限" not in main_kw and ref_df is not manager_df:
-                    total_errors += compare_and_mark(idx,row,main_df,main_kw,ref_df,ref_kw,
-                                                     ref_contract_col,ws,red_fill,
-                                                     contract_col_main,tol,1)
+                    total_errors += compare_and_mark(idx, row, main_df, main_kw, ref_df, ref_kw,
+                                                     ref_contract_col, ws, red_fill,
+                                                     contract_col_main, tol, 1)
 
         progress.progress((idx+1)/n_rows)
         if (idx+1)%10==0 or idx+1==n_rows:
@@ -216,11 +229,11 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df):
     contract_col_idx_excel = list(main_df.columns).index(contract_col_main)+1
     for row_idx in range(len(main_df)):
         excel_row = row_idx + 2 + header_offset
-        has_red = any(ws.cell(excel_row,c).fill==red_fill for c in range(1,len(main_df.columns)+1))
+        has_red = any(ws.cell(excel_row, c).fill == red_fill for c in range(1, len(main_df.columns)+1))
         if has_red:
-            ws.cell(excel_row,contract_col_idx_excel).fill = yellow_fill
-        for c_idx,val in enumerate(main_df.iloc[row_idx],start=1):
-            ws.cell(excel_row,c_idx,val)
+            ws.cell(excel_row, contract_col_idx_excel).fill = yellow_fill
+        for c_idx, val in enumerate(main_df.iloc[row_idx], start=1):
+            ws.cell(excel_row, c_idx, val)
 
     output_stream = BytesIO()
     wb.save(output_stream)
@@ -245,3 +258,4 @@ if not target_sheets:
 else:
     for sheet_name in target_sheets:
         audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df)
+
