@@ -5,6 +5,7 @@
 # - 仅“年限/租赁期限”允许 ±0.5 月误差（经理表年 -> 乘12）
 # - ✅ 新增 “操作人 vs 客户经理” 比对
 # - ✅ 新增 “产品 vs 产品名称_商” 比对
+# - ✅ 改进文本比对：自动忽略全角空格、符号差异、大小写差异
 # =====================================
 
 import streamlit as st
@@ -12,6 +13,8 @@ import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
 from io import BytesIO
+import unicodedata
+import re
 
 st.title("📊 人事用审核工具（扩展）：起租/二次/平台工/独立架构/低价值 + 经理年限 + 操作人核对 + 产品名称比对")
 
@@ -61,15 +64,16 @@ def normalize_num(val):
     except:
         return s
 
-def same_date_ymd(a, b):
-    try:
-        da = pd.to_datetime(a, errors='coerce')
-        db = pd.to_datetime(b, errors='coerce')
-        if pd.isna(da) or pd.isna(db):
-            return False
-        return (da.year == db.year) and (da.month == db.month) and (da.day == db.day)
-    except:
-        return False
+def normalize_text(val):
+    """去除换行、全角空格、统一全角半角、小写化"""
+    if pd.isna(val):
+        return ""
+    s = str(val)
+    s = re.sub(r'[\n\r\t]', '', s)
+    s = s.strip().replace('\u3000', '')
+    s = ''.join(unicodedata.normalize('NFKC', ch) for ch in s)
+    s = s.lower()
+    return s
 
 def detect_header_row(file, sheet_name):
     preview = pd.read_excel(file, sheet_name=sheet_name, nrows=2, header=None)
@@ -123,7 +127,7 @@ def compare_and_mark(
             if abs(main_num - ref_num) > 0.5:
                 errors = 1
         else:
-            if str(main_val).strip() != str(ref_val).strip():
+            if normalize_text(main_val) != normalize_text(ref_val):
                 errors = 1
 
     # ---- 2) 日期类字段 ----
@@ -144,7 +148,7 @@ def compare_and_mark(
             if abs(main_num - ref_num) > ignore_tol:
                 errors = 1
         else:
-            if str(main_num).strip() != str(ref_val).strip():
+            if normalize_text(main_val) != normalize_text(ref_val):
                 errors = 1
 
     # ---- 标红单元格 ----
@@ -208,7 +212,7 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df):
         "操作人": [
             (fk_df, "客户经理", contract_col_fk, 1, 0)
         ],
-        # ✅ 新增 产品 vs 产品名称_商
+        # ✅ 产品 vs 产品名称_商
         "产品": [
             (product_df, "产品名称_商", contract_col_product, 1, 0)
         ]
