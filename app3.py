@@ -202,6 +202,7 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, ove
         "收益率": [(product_df, "XIRR_商_起租", contract_col_product, 1, 0.005)],
         "租赁期限": [(manager_df, "租赁期限", contract_col_mgr, 12, 0)],
         "操作人": [(fk_df, "客户经理", contract_col_fk, 1, 0)],
+        "客户经理": [(fk_df, "客户经理", contract_col_fk, 1, 0)],
         "产品": [(product_df, "产品名称_商", contract_col_product, 1, 0)],
         # ✅ 新增：城市经理校验
         "城市经理": [(overdue_df, "城市经理", contract_col_overdue, 1, 0)]
