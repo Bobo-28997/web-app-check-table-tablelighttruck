@@ -1,13 +1,13 @@
 # =====================================
-# Streamlit App: 人事用“提成项目 & 二次项目 & 平台工 & 独立架构 & 低价值 & 权责发生”自动审核（终极版）
-# - 严格控制字段比对逻辑
-# - 日期解析容错
-# - “租赁期限”±0.5 月误差（经理表年 -> 乘12）
+# Streamlit App: 人事用“提成项目 & 二次项目 & 平台工 & 独立架构 & 低价值 & 权责发生”自动审核（终极修正版）
+# - 严格字段比对
+# - 日期容错
+# - “租赁期限”±0.5 月（经理表年 -> ×12）
 # - ✅ 操作人 vs 客户经理
 # - ✅ 产品 vs 产品名称_商
 # - ✅ 城市经理 vs 超期明细 城市经理
-# - ✅ 权责发生表字段 vs 经理表字段（车辆台数/挂车数量/车型/提报人员）
-# - ✅ 最终漏填检测（经理表合同号 vs 六表合同号）
+# - ✅ 权责发生字段 vs 经理表字段
+# - ✅ 最终漏填检测：使用“放款明细”中含“提成”的sheet为基准
 # =====================================
 
 import streamlit as st
@@ -17,7 +17,7 @@ from openpyxl.styles import PatternFill
 from io import BytesIO
 import unicodedata, re
 
-st.title("📊 人事用审核工具（终极版：含漏填检测）")
+st.title("📊 人事用审核工具（终极修正版：含漏填检测-提成sheet版）")
 
 # ========== 上传文件 ==========
 uploaded_files = st.file_uploader(
@@ -30,7 +30,6 @@ if not uploaded_files or len(uploaded_files) < 5:
     st.stop()
 else:
     st.success("✅ 文件上传完成")
-
 
 # ========== 工具函数 ==========
 def find_file(files_list, keyword):
@@ -90,7 +89,6 @@ def get_header_row(file, sheet_name):
     if any(k in sheet_name for k in ["起租", "二次"]):
         return 1
     return detect_header_row(file, sheet_name)
-
 
 # ========== 比对函数 ==========
 def compare_and_mark(
@@ -159,7 +157,6 @@ def compare_and_mark(
 
     return errors
 
-
 # ========== 文件读取 ==========
 main_file = find_file(uploaded_files, "提成项目")
 ec_file = find_file(uploaded_files, "二次明细")
@@ -170,20 +167,22 @@ overdue_file = find_file(uploaded_files, "超期明细")
 ec_df = pd.read_excel(ec_file)
 fk_xls = pd.ExcelFile(fk_file)
 fk_df = pd.read_excel(fk_xls, sheet_name=[s for s in fk_xls.sheet_names if "本司" in s][0])
-mgr_sheets = [s for s in fk_xls.sheet_names if "经理" in s]
-manager_df = pd.read_excel(fk_xls, sheet_name=mgr_sheets[0]) if mgr_sheets else None
 product_df = pd.read_excel(product_file)
 overdue_df = pd.read_excel(overdue_file)
 
+# ---- 新增提成sheet提取 ----
+commission_sheets = [s for s in fk_xls.sheet_names if "提成" in s]
+commission_df = pd.read_excel(fk_xls, sheet_name=commission_sheets[0]) if commission_sheets else None
+
+# ---- 其他sheet合同列 ----
 contract_col_ec = find_col(ec_df, "合同")
 contract_col_fk = find_col(fk_df, "合同")
-contract_col_mgr = find_col(manager_df, "合同") if manager_df is not None else None
+contract_col_comm = find_col(commission_df, "合同") if commission_df is not None else None
 contract_col_product = find_col(product_df, "合同")
 contract_col_overdue = find_col(overdue_df, "合同")
 
-
 # ========== 审核函数 ==========
-def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, overdue_df):
+def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, commission_df, overdue_df):
     xls_main = pd.ExcelFile(main_file)
     global header_offset
     header_row = get_header_row(main_file, sheet_name)
@@ -201,15 +200,10 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, ove
                      (product_df, "起租日_商", contract_col_product, 1, 0)],
         "租赁本金": [(fk_df, "租赁本金", contract_col_fk, 1, 0)],
         "收益率": [(product_df, "XIRR_商_起租", contract_col_product, 1, 0.005)],
-        "租赁期限": [(manager_df, "租赁期限", contract_col_mgr, 12, 0)],
         "操作人": [(fk_df, "客户经理", contract_col_fk, 1, 0)],
         "客户经理": [(fk_df, "客户经理", contract_col_fk, 1, 0)],
         "产品": [(product_df, "产品名称_商", contract_col_product, 1, 0)],
         "城市经理": [(overdue_df, "城市经理", contract_col_overdue, 1, 0)],
-        "车辆台数": [(manager_df, "车辆台数", contract_col_mgr, 1, 0)],
-        "挂车数量": [(manager_df, "挂车数量", contract_col_mgr, 1, 0)],
-        "车型": [(manager_df, "车型", contract_col_mgr, 1, 0)],
-        "提报人员": [(manager_df, "提报人员", contract_col_mgr, 1, 0)]
     }
 
     wb = Workbook()
@@ -243,7 +237,6 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, ove
         if (idx + 1) % 10 == 0 or idx + 1 == n_rows:
             status.text(f"{sheet_name}：{idx + 1}/{n_rows} 行")
 
-    # ==== 标黄合同号列 ====
     contract_col_idx_excel = list(main_df.columns).index(contract_col_main) + 1
     for row_idx in range(len(main_df)):
         excel_row = row_idx + 2 + header_offset
@@ -266,7 +259,6 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, ove
     st.success(f"✅ {sheet_name} 审核完成，共发现 {total_errors} 处错误")
     return main_df, total_errors
 
-
 # ========== 执行主流程 ==========
 xls_main = pd.ExcelFile(main_file)
 target_sheets = [
@@ -280,18 +272,18 @@ if not target_sheets:
     st.warning("⚠️ 未找到目标 sheet。")
 else:
     for sheet_name in target_sheets:
-        df, _ = audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, overdue_df)
+        df, _ = audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, commission_df, overdue_df)
         if df is not None:
             col = find_col(df, "合同")
             if col:
                 all_contracts_in_sheets.update(str(c).strip() for c in df[col].dropna().unique())
 
-    # ======= 检查漏填合同 =======
-    if manager_df is not None and contract_col_mgr:
-        mgr_contracts = set(str(c).strip() for c in manager_df[contract_col_mgr].dropna().unique())
-        missing_contracts = sorted(list(mgr_contracts - all_contracts_in_sheets))
+    # ======= 新逻辑：使用“提成”sheet合同号检测漏填 =======
+    if commission_df is not None and contract_col_comm:
+        commission_contracts = set(str(c).strip() for c in commission_df[contract_col_comm].dropna().unique())
+        missing_contracts = sorted(list(commission_contracts - all_contracts_in_sheets))
 
-        st.subheader("📋 合同漏填检测结果")
+        st.subheader("📋 合同漏填检测结果（基于提成sheet）")
         st.write(f"共 {len(missing_contracts)} 个合同在六张表中未出现。")
 
         if missing_contracts:
@@ -311,7 +303,5 @@ else:
                 file_name="漏填合同号列表.xlsx",
                 mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             )
-
         else:
-            st.success("✅ 所有经理表合同号均已出现在六张表中，无漏填。")
-
+            st.success("✅ 所有提成sheet合同号均已出现在六张表中，无漏填。")
