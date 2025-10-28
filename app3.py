@@ -1,12 +1,12 @@
 # =====================================
-# Streamlit App: 人事用“提成项目 & 二次项目 & 平台工 & 独立架构 & 低价值”自动审核（扩展版）
+# Streamlit App: 人事用“提成项目 & 二次项目 & 平台工 & 独立架构 & 低价值 & 权责发生”自动审核（增强版）
 # - 严格控制字段比对逻辑
 # - 日期解析容错
 # - “租赁期限”±0.5 月误差（经理表年 -> 乘12）
 # - ✅ 操作人 vs 客户经理
 # - ✅ 产品 vs 产品名称_商
 # - ✅ 城市经理 vs 超期明细 城市经理
-# - ✅ 忽略空合同号、大小写差异、全角/半角差异
+# - ✅ 权责发生表字段 vs 经理表字段（车辆台数/挂车数量/车型/提报人员）
 # =====================================
 
 import streamlit as st
@@ -16,7 +16,7 @@ from openpyxl.styles import PatternFill
 from io import BytesIO
 import unicodedata, re
 
-st.title("📊 人事用审核工具（扩展+城市经理校验）")
+st.title("📊 人事用审核工具（扩展+权责发生+城市经理校验）")
 
 # ========== 上传文件 ==========
 uploaded_files = st.file_uploader(
@@ -70,7 +70,7 @@ def normalize_text(val):
         return ""
     s = str(val)
     s = re.sub(r'[\n\r\t ]+', '', s)
-    s = s.replace('\u3000', '')  # 全角空格
+    s = s.replace('\u3000', '')
     s = ''.join(unicodedata.normalize('NFKC', ch) for ch in s)
     return s.lower().strip()
 
@@ -194,18 +194,20 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, ove
 
     # ==== 对照规则 ====
     mapping_rules = {
-        "起租日期": [
-            (ec_df, "起租日_商", contract_col_ec, 1, 0),
-            (product_df, "起租日_商", contract_col_product, 1, 0),
-        ],
+        "起租日期": [(ec_df, "起租日_商", contract_col_ec, 1, 0),
+                   (product_df, "起租日_商", contract_col_product, 1, 0)],
         "租赁本金": [(fk_df, "租赁本金", contract_col_fk, 1, 0)],
         "收益率": [(product_df, "XIRR_商_起租", contract_col_product, 1, 0.005)],
         "租赁期限": [(manager_df, "租赁期限", contract_col_mgr, 12, 0)],
         "操作人": [(fk_df, "客户经理", contract_col_fk, 1, 0)],
         "客户经理": [(fk_df, "客户经理", contract_col_fk, 1, 0)],
         "产品": [(product_df, "产品名称_商", contract_col_product, 1, 0)],
-        # ✅ 新增：城市经理校验
-        "城市经理": [(overdue_df, "城市经理", contract_col_overdue, 1, 0)]
+        "城市经理": [(overdue_df, "城市经理", contract_col_overdue, 1, 0)],
+        # ✅ 新增：权责发生表字段（从经理表对照）
+        "车辆台数": [(manager_df, "车辆台数", contract_col_mgr, 1, 0)],
+        "挂车数量": [(manager_df, "挂车数量", contract_col_mgr, 1, 0)],
+        "车型": [(manager_df, "车型", contract_col_mgr, 1, 0)],
+        "提报人员": [(manager_df, "提报人员", contract_col_mgr, 1, 0)]
     }
 
     wb = Workbook()
@@ -263,12 +265,17 @@ def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, ove
     st.success(f"✅ {sheet_name} 审核完成，共发现 {total_errors} 处错误")
     return main_df, total_errors
 
+
 # ========== 执行 ==========
 xls_main = pd.ExcelFile(main_file)
-target_sheets = [s for s in xls_main.sheet_names if any(k in s for k in ["起租", "二次", "平台工", "独立架构", "低价值"])]
+target_sheets = [
+    s for s in xls_main.sheet_names
+    if any(k in s for k in ["起租", "二次", "平台工", "独立架构", "低价值", "权责发生"])
+]
 
 if not target_sheets:
     st.warning("⚠️ 未找到目标 sheet。")
 else:
     for sheet_name in target_sheets:
         audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, manager_df, overdue_df)
+
