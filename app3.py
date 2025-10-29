@@ -108,8 +108,14 @@ def normalize_contract_key(series: pd.Series) -> pd.Series:
 def prepare_one_ref_df(ref_df, ref_contract_col, required_cols, prefix):
     """
     预处理单个参考DataFrame，提取所需列并标准化Key。
+    (V2: 增加未找到列的警告)
     """
-    if ref_df is None or ref_contract_col is None:
+    if ref_df is None:
+        st.warning(f"⚠️ 参考文件 '{prefix}' 未加载 (df is None)。")
+        return pd.DataFrame(columns=['__KEY__'])
+        
+    if ref_contract_col is None:
+        st.warning(f"⚠️ 在 {prefix} 参考表中未找到'合同'列，跳过此数据源。")
         return pd.DataFrame(columns=['__KEY__'])
 
     # 找出实际存在的列
@@ -118,17 +124,31 @@ def prepare_one_ref_df(ref_df, ref_contract_col, required_cols, prefix):
 
     for col_kw in required_cols:
         actual_col = find_col(ref_df, col_kw)
+        
         if actual_col:
             cols_to_extract.append(actual_col)
-            # 使用原始列名 (ref_kw) 作为标准后缀
+            # 使用原始列名 (col_kw) 作为标准后缀
             col_mapping[actual_col] = f"ref_{prefix}_{col_kw}"
-        
+        else:
+            # --- VVVV (【新功能】添加警告) VVVV ---
+            st.warning(f"⚠️ 在 {prefix} 参考表中未找到列 (关键字: '{col_kw}')")
+            # --- ^^^^ (【新功能】添加警告) ^^^^ ---
+            
     if not cols_to_extract:
+        # 如果一个需要的列都没找到，也不用继续了
+        st.warning(f"⚠️ 在 {prefix} 参考表中未找到任何所需字段，跳过。")
         return pd.DataFrame(columns=['__KEY__'])
 
     # 提取所需列 + 合同列
     cols_to_extract.append(ref_contract_col)
-    std_df = ref_df[list(set(cols_to_extract))].copy()
+    
+    # 确保所有列都是唯一的
+    cols_to_extract_unique = list(set(cols_to_extract))
+    
+    # 检查所有列是否真的存在 (set 操作可能引入不存在的列, 尽管这里不太可能)
+    valid_cols = [col for col in cols_to_extract_unique if col in ref_df.columns]
+    
+    std_df = ref_df[valid_cols].copy()
 
     # 标准化Key
     std_df['__KEY__'] = normalize_contract_key(std_df[ref_contract_col])
@@ -138,7 +158,11 @@ def prepare_one_ref_df(ref_df, ref_contract_col, required_cols, prefix):
     
     # 只保留需要的列
     final_cols = ['__KEY__'] + list(col_mapping.values())
-    std_df = std_df[final_cols]
+    
+    # 确保 final_cols 都在 std_df 中 (因为重命名了)
+    final_cols_in_df = [col for col in final_cols if col in std_df.columns]
+    
+    std_df = std_df[final_cols_in_df]
     
     # 去重
     std_df = std_df.drop_duplicates(subset=['__KEY__'], keep='first')
