@@ -341,6 +341,66 @@ def audit_sheet_vec(sheet_name, main_file, all_std_dfs, mapping_rules_vec):
         key=f"download_{sheet_name}" # 添加唯一的key
     )
 
+    # --- VVVV (【新功能】从这里开始添加) VVVV ---
+
+    # 7. (新) 导出仅含错误行的文件 (带标红)
+    if row_has_error.any():
+        try:
+            # 1. 获取仅含错误行的 DataFrame (只保留原始列)
+            df_errors_only = merged_df.loc[row_has_error, original_cols_list].copy()
+            
+            # 2. 关键：创建 "原始行索引" 到 "新Excel行号" 的映射
+            #    我们获取所有出错行的 __ROW_IDX__
+            original_indices_with_error = merged_df.loc[row_has_error, '__ROW_IDX__']
+            
+            #    创建映射: { 原始索引 : 新的Excel行号 }
+            #    (enumerate start=2, 因为 Excel 行 1 是表头, 数据从行 2 开始)
+            original_idx_to_new_excel_row = {
+                original_idx: new_row_num 
+                for new_row_num, original_idx in enumerate(original_indices_with_error, start=2)
+            }
+
+            # 3. 创建一个新的工作簿(Workbook)
+            wb_errors = Workbook()
+            ws_errors = wb_errors.active
+            
+            # 4. 使用 dataframe_to_rows 快速写入数据
+            for r in dataframe_to_rows(df_errors_only, index=False, header=True):
+                ws_errors.append(r)
+                
+            # 5. 遍历主错误列表(errors_locations)，进行标红
+            #    (col_name_to_idx 和 red_fill 已在前面定义)
+            for (original_row_idx, col_name) in errors_locations:
+                
+                # 检查这个错误是否在我们 "仅错误行" 的映射中
+                if original_row_idx in original_idx_to_new_excel_row:
+                    
+                    # 获取它在新Excel文件中的行号
+                    new_row = original_idx_to_new_excel_row[original_row_idx]
+                    
+                    # 获取列号
+                    if col_name in col_name_to_idx:
+                        new_col = col_name_to_idx[col_name]
+                        
+                        # 应用标红
+                        ws_errors.cell(row=new_row, column=new_col).fill = red_fill
+            
+            # 6. 保存到 BytesIO
+            output_errors_only = BytesIO()
+            wb_errors.save(output_errors_only)
+            output_errors_only.seek(0)
+            
+            # 7. 创建第二个下载按钮
+            st.download_button(
+                label=f"📥 下载 {sheet_name} (仅含错误行, 带标红)", # 更新了标签
+                data=output_errors_only,
+                file_name=f"{sheet_name}_仅错误行_标红.xlsx", # 更新了文件名
+                key=f"download_{sheet_name}_errors_only" # 必须使用唯一的 key
+            )
+        except Exception as e:
+            st.error(f"❌ 生成“仅错误行”文件时出错: {e}")
+            
+    # --- ^^^^ (【新功能】到这里结束) ^^^^ ---
     st.success(f"✅ {sheet_name} 审核完成，共发现 {total_errors} 处错误")
     
     # 返回原始的 main_df (不含 __KEY__), 用于漏填检测
