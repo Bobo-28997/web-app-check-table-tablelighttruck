@@ -300,7 +300,7 @@ def audit_sheet_vec(sheet_name, main_file, all_std_dfs, mapping_rules_vec):
     yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
    # c. 准备坐标映射 (我们把 c 移到 b 之前)
-    original_cols_list = list(main_df.drop(columns=['__ROW_IDX__', '__KEY__']).columns)
+    original_cols_list = list(main_df.drop(columns=['__ROW_IDX__', '__KEY__']).columns)
     
     # a. 写入表头前的空行 (如果需要)
     if header_offset > 0:
