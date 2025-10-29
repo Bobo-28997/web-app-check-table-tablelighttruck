@@ -20,6 +20,8 @@ import unicodedata, re
 
 st.title("📊 模拟人事用薪资计算表自动审核系统-2")
 
+st.image("image/app2image.drawio.png")
+
 # ========== 上传文件 ==========
 uploaded_files = st.file_uploader(
     "请上传文件名中包含以下字段的文件：提成项目、放款明细、二次明细、产品台账，超期明细。最后誊写，需检的表为提成项目表。使用2数据时，提成项目表中需检sheet的‘年限’等月单位的时长列名需改为‘租赁期限’。",
