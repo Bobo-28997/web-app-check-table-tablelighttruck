@@ -303,15 +303,15 @@ def audit_sheet_vec(sheet_name, main_file, all_std_dfs, mapping_rules_vec):
     original_cols_list = list(main_df.drop(columns=['__ROW_IDX__', '__KEY__']).columns)
     
     # a. 写入表头前的空行 (如果需要)
-    if header_offset > 0:
-        for _ in range(header_offset):
+    if header_offset > 0:
+        for _ in range(header_offset):
             # (修正：使用 original_cols_list 的长度, 而不是 main_df.columns 的长度)
-            ws.append([""] * len(original_cols_list)) # 添加空行
-            
-    # b. 使用 dataframe_to_rows 快速写入表头 + 数据
-    #    (注意：我们在这里传入了 original_cols_list, 确保列序正确)
-    for r in dataframe_to_rows(main_df[original_cols_list], index=False, header=True):
-        ws.append(r)
+            ws.append([""] * len(original_cols_list)) # 添加空行
+            
+    # b. 使用 dataframe_to_rows 快速写入表头 + 数据
+    #    (注意：我们在这里传入了 original_cols_list, 确保列序正确)
+    for r in dataframe_to_rows(main_df[original_cols_list], index=False, header=True):
+        ws.append(r)
 
     # d. 标红错误单元格
     for (row_idx, col_name) in errors_locations:
@@ -433,32 +433,32 @@ else:
 
 # ======= 新逻辑：使用“提成”sheet合同号检测漏填 =======
 if commission_df is not None and contract_col_comm:
-    # (新) 必须同样标准化提成表的合同号
-    commission_contracts = set(normalize_contract_key(commission_df[contract_col_comm].dropna()))
-    
-    missing_contracts = sorted(list(commission_contracts - all_contracts_in_sheets))
+    # (新) 必须同样标准化提成表的合同号
+    commission_contracts = set(normalize_contract_key(commission_df[contract_col_comm].dropna()))
+    
+    missing_contracts = sorted(list(commission_contracts - all_contracts_in_sheets))
 
-    # --- VVVV (从这里开始, 修复了缩进) VVVV ---
-    st.subheader("📋 合同漏填检测结果（基于提成sheet）")
-    st.write(f"共 {len(missing_contracts)} 个合同在六张表中未出现。")
+    # --- VVVV (从这里开始, 修复了缩进) VVVV ---
+    st.subheader("📋 合同漏填检测结果（基于提成sheet）")
+    st.write(f"共 {len(missing_contracts)} 个合同在六张表中未出现。")
 
-    if missing_contracts:
-        wb_miss = Workbook()
-        ws_miss = wb_miss.active
-        ws_miss.cell(1, 1, "未出现在任一表中的合同号")
-        yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
-        for i, cno in enumerate(missing_contracts, start=2):
-            ws_miss.cell(i, 1, cno).fill = yellow
+    if missing_contracts:
+        wb_miss = Workbook()
+        ws_miss = wb_miss.active
+        ws_miss.cell(1, 1, "未出现在任一表中的合同号")
+        yellow = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+        for i, cno in enumerate(missing_contracts, start=2):
+            ws_miss.cell(i, 1, cno).fill = yellow
 
-        out_miss = BytesIO()
-        wb_miss.save(out_miss)
-        out_miss.seek(0)
-        st.download_button(
-            "📥 下载漏填合同列表",
-            data=out_miss,
-            file_name="漏填合同号列表.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        )
-    else:
-        st.success("✅ 所有提成sheet合同号均已出现在六张表中，无漏填。")
+        out_miss = BytesIO()
+        wb_miss.save(out_miss)
+        out_miss.seek(0)
+        st.download_button(
+            "📥 下载漏填合同列表",
+            data=out_miss,
+            file_name="漏填合同号列表.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+    else:
+        st.success("✅ 所有提成sheet合同号均已出现在六张表中，无漏填。")
 _ # --- ^^^^ (到这里结束) ^^^^ ---
