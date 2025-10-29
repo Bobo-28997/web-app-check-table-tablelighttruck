@@ -18,7 +18,7 @@ from openpyxl.utils.dataframe import dataframe_to_rows # <--- 添加这一行
 from io import BytesIO
 import unicodedata, re
 
-st.title("📊 人事用审核工具（终极修正版：含漏填检测-提成sheet版）")
+st.title("📊 向量优化人事用审核工具（终极修正版：含漏填检测-提成sheet版）")
 
 # ========== 上传文件 ==========
 uploaded_files = st.file_uploader(
