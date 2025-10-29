@@ -301,6 +301,7 @@ def audit_sheet_vec(sheet_name, main_file, all_std_dfs, mapping_rules_vec):
 
    # c. 准备坐标映射 (我们把 c 移到 b 之前)
     original_cols_list = list(main_df.drop(columns=['__ROW_IDX__', '__KEY__']).columns)
+    col_name_to_idx = {name: i + 1 for i, name in enumerate(original_cols_list)}
     
     # a. 写入表头前的空行 (如果需要)
     if header_offset > 0:
