@@ -14,6 +14,7 @@ import streamlit as st
 import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill
+from openpyxl.utils.dataframe import dataframe_to_rows # <--- 添加这一行
 from io import BytesIO
 import unicodedata, re
 
@@ -90,80 +91,269 @@ def get_header_row(file, sheet_name):
         return 1
     return detect_header_row(file, sheet_name)
 
+def normalize_contract_key(series: pd.Series) -> pd.Series:
+    """
+    对合同号 Series 进行标准化处理，用于安全的 pd.merge 操作。
+    (来自我们上一个 app 的经验)
+    """
+    s = series.astype(str)
+    s = s.str.replace(r"\.0$", "", regex=True) 
+    s = s.str.strip()
+    s = s.str.upper() 
+    s = s.str.replace('－', '-', regex=False)
+    # 注意：这里我们不用 normalize_text 的 r'\s+'
+    # 因为合同号内部可能允许有空格
+    return s
+
+def prepare_one_ref_df(ref_df, ref_contract_col, required_cols, prefix):
+    """
+    预处理单个参考DataFrame，提取所需列并标准化Key。
+    """
+    if ref_df is None or ref_contract_col is None:
+        return pd.DataFrame(columns=['__KEY__'])
+
+    # 找出实际存在的列
+    cols_to_extract = []
+    col_mapping = {} # '原始列名' -> 'ref_prefix_原始列名'
+
+    for col_kw in required_cols:
+        actual_col = find_col(ref_df, col_kw)
+        if actual_col:
+            cols_to_extract.append(actual_col)
+            # 使用原始列名 (ref_kw) 作为标准后缀
+            col_mapping[actual_col] = f"ref_{prefix}_{col_kw}"
+        
+    if not cols_to_extract:
+        return pd.DataFrame(columns=['__KEY__'])
+
+    # 提取所需列 + 合同列
+    cols_to_extract.append(ref_contract_col)
+    std_df = ref_df[list(set(cols_to_extract))].copy()
+
+    # 标准化Key
+    std_df['__KEY__'] = normalize_contract_key(std_df[ref_contract_col])
+    
+    # 重命名
+    std_df = std_df.rename(columns=col_mapping)
+    
+    # 只保留需要的列
+    final_cols = ['__KEY__'] + list(col_mapping.values())
+    std_df = std_df[final_cols]
+    
+    # 去重
+    std_df = std_df.drop_duplicates(subset=['__KEY__'], keep='first')
+    return std_df
+
+def compare_series_vec(s_main, s_ref, compare_type='text', tolerance=0, multiplier=1):
+    """
+    向量化比较两个Series，复刻 compare_and_mark 的逻辑。
+    (V2：增加对 merge 失败 (NaN) 的静默跳过)
+    """
+    # 0. 识别 Merge 失败
+    merge_failed_mask = s_ref.isna()
+
+    # 1. 预处理空值
+    main_is_na = pd.isna(s_main) | (s_main.astype(str).str.strip().isin(["", "nan", "None"]))
+    ref_is_na = pd.isna(s_ref) | (s_ref.astype(str).str.strip().isin(["", "nan", "None"]))
+    both_are_na = main_is_na & ref_is_na
+    
+    errors = pd.Series(False, index=s_main.index)
+
+    # 2. 日期比较
+    if compare_type == 'date':
+        d_main = pd.to_datetime(s_main, errors='coerce')
+        d_ref = pd.to_datetime(s_ref, errors='coerce')
+        
+        # 仅在两者都是有效日期时比较
+        valid_dates_mask = d_main.notna() & d_ref.notna()
+        date_diff_mask = (d_main.dt.date != d_ref.dt.date)
+        errors = valid_dates_mask & date_diff_mask
+        
+        # 如果一个是日期，另一个不是（且不为空），也算错误
+        one_is_date_one_is_not = (d_main.notna() & d_ref.isna() & ~ref_is_na) | \
+                                 (d_main.isna() & ~main_is_na & d_ref.notna())
+        errors |= one_is_date_one_is_not
+
+    # 3. 数值比较 (包括特殊的租赁期限)
+    elif compare_type == 'num':
+        s_main_norm = s_main.apply(normalize_num)
+        s_ref_norm = s_ref.apply(normalize_num)
+        
+        # 应用乘数
+        if multiplier != 1:
+            s_ref_norm = pd.to_numeric(s_ref_norm, errors='coerce') * multiplier
+        
+        # 检查是否都为数值
+        is_num_main = s_main_norm.apply(lambda x: isinstance(x, (int, float)))
+        is_num_ref = s_ref_norm.apply(lambda x: isinstance(x, (int, float)))
+        both_are_num = is_num_main & is_num_ref
+
+        if both_are_num.any():
+            diff = (s_main_norm[both_are_num] - s_ref_norm[both_are_num]).abs()
+            errors.loc[both_are_num] = (diff > (tolerance + 1e-6)) # 1e-6 避免浮点精度问题
+            
+        # 如果一个是数字，另一个是文本（且不为空），也算错误
+        one_is_num_one_is_not = (is_num_main & ~is_num_ref & ~ref_is_na) | \
+                                (~is_num_main & ~main_is_na & is_num_ref)
+        errors |= one_is_num_one_is_not
+
+    # 4. 文本比较
+    else: # compare_type == 'text'
+        s_main_norm_text = s_main.apply(normalize_text)
+        s_ref_norm_text = s_ref.apply(normalize_text)
+        errors = (s_main_norm_text != s_ref_norm_text)
+
+    # 5. 最终错误逻辑
+    final_errors = errors & ~both_are_na
+    
+    # 排除 "Merge 失败" 导致的错误 (复刻 'if ref_rows.empty: return 0')
+    lookup_failure_mask = merge_failed_mask & ~main_is_na
+    final_errors = final_errors & ~lookup_failure_mask
+    
+    return final_errors
+
 # ========== 比对函数 ==========
-def compare_and_mark(
-    idx, row, main_df, main_kw, ref_df, ref_kw, ref_contract_col,
-    ws, red_fill, contract_col_main, ignore_tol=0, multiplier=1
-):
-    main_col = find_col(main_df, main_kw)
-    ref_col = find_col(ref_df, ref_kw)
-    if not main_col or not ref_col or not ref_contract_col:
-        return 0
+# =====================================
+# 🧮 审核函数 (向量化版)
+# =====================================
+def audit_sheet_vec(sheet_name, main_file, all_std_dfs, mapping_rules_vec):
+    xls_main = pd.ExcelFile(main_file)
+    
+    # 1. 读取主表 (尊重动态表头)
+    header_offset = get_header_row(main_file, sheet_name)
+    main_df = pd.read_excel(xls_main, sheet_name=sheet_name, header=header_offset)
+    st.write(f"📘 审核中：{sheet_name}（header={header_offset}）")
 
-    contract_no = str(row.get(contract_col_main)).strip()
-    if pd.isna(contract_no) or contract_no in ["", "nan", "None", "none"]:
-        return 0
+    contract_col_main = find_col(main_df, "合同")
+    if not contract_col_main:
+        st.error(f"❌ {sheet_name} 中未找到“合同”列，已跳过。")
+        return None, 0
 
-    ref_rows = ref_df[ref_df[ref_contract_col].astype(str).str.strip() == contract_no]
-    if ref_rows.empty:
-        return 0
+    # 2. 准备主表
+    main_df['__ROW_IDX__'] = main_df.index
+    main_df['__KEY__'] = normalize_contract_key(main_df[contract_col_main])
 
-    ref_val = ref_rows.iloc[0][ref_col]
-    main_val = row.get(main_col)
-    if pd.isna(main_val) and pd.isna(ref_val):
-        return 0
+    # 3. 一次性合并所有参考数据
+    merged_df = main_df.copy()
+    for std_df in all_std_dfs.values():
+        if not std_df.empty:
+            merged_df = pd.merge(merged_df, std_df, on='__KEY__', how='left')
 
-    errors = 0
+    # 4. === 遍历字段进行向量化比对 ===
+    total_errors = 0
+    errors_locations = set() # 存储 (row_idx, col_name)
+    row_has_error = pd.Series(False, index=merged_df.index)
 
-    # ---- 年限 / 租赁期限 ----
-    if any(k in main_kw for k in ["年限", "租赁期限"]):
-        main_num = normalize_num(main_val)
-        ref_num = normalize_num(ref_val)
-        if isinstance(ref_num, (int, float)):
-            ref_num = ref_num * multiplier
-        if isinstance(main_num, (int, float)) and isinstance(ref_num, (int, float)):
-            if abs(main_num - ref_num) > 0.5:
-                errors = 1
-        else:
-            if normalize_text(main_val) != normalize_text(ref_val):
-                errors = 1
+    progress = st.progress(0)
+    status = st.empty()
+    
+    total_comparisons = len(mapping_rules_vec)
+    current_comparison = 0
 
-    # ---- 日期字段 ----
-    elif "日期" in main_kw or any(word in main_kw for word in ["起租日", "起租日期", "起租"]):
-        main_dt = pd.to_datetime(main_val, errors='coerce')
-        ref_dt = pd.to_datetime(ref_val, errors='coerce')
-        if pd.isna(main_dt) or pd.isna(ref_dt):
-            errors = 1
-        else:
-            if not (main_dt.year == ref_dt.year and main_dt.month == ref_dt.month and main_dt.day == ref_dt.day):
-                errors = 1
+    for main_kw, comparisons in mapping_rules_vec.items():
+        current_comparison += 1
+        
+        main_col = find_col(main_df, main_kw)
+        if not main_col:
+            continue # 跳过主表中不存在的列
+        
+        status.text(f"检查「{sheet_name}」: {main_kw}...")
+        
+        # 存储此字段的最终错误
+        field_error_mask = pd.Series(False, index=merged_df.index)
+        
+        for (ref_col, compare_type, tol, mult) in comparisons:
+            if ref_col not in merged_df.columns:
+                continue # 跳过 merge 失败或未定义的参考列
+            
+            s_main = merged_df[main_col]
+            s_ref = merged_df[ref_col]
+            
+            # 获取此单一比对的错误
+            # (注意：如果一个字段有多个比对源, 它们是 'OR' 关系)
+            # (即, 只要和 *一个* 源匹配成功, 就不算错... 
+            #  ...等一下, 原始逻辑是 (err1 + err2 + ...), 
+            #  这意味着只要 *一个* 源 *不* 匹配, 就算错)
+            
+            errors_mask = compare_series_vec(s_main, s_ref, compare_type, tol, mult)
+            
+            # 累加错误 (原始逻辑是 total_errors +=, 意味着一个错就算错)
+            field_error_mask |= errors_mask
+        
+        if field_error_mask.any():
+            total_errors += field_error_mask.sum()
+            row_has_error |= field_error_mask
+            
+            # 存储错误位置 (使用 __ROW_IDX__ 和 原始 main_col 名称)
+            bad_indices = merged_df[field_error_mask]['__ROW_IDX__']
+            for idx in bad_indices:
+                errors_locations.add((idx, main_col))
+        
+        progress.progress(current_comparison / total_comparisons)
 
-    # ---- 数值 / 文本字段 ----
-    else:
-        main_num = normalize_num(main_val)
-        ref_num = normalize_num(ref_val)
-        if isinstance(main_num, (int, float)) and isinstance(ref_num, (int, float)):
-            if abs(main_num - ref_num) > ignore_tol:
-                errors = 1
-        else:
-            if normalize_text(main_val) != normalize_text(ref_val):
-                errors = 1
+    status.text(f"「{sheet_name}」比对完成，正在生成标注文件...")
 
-    # ---- 标红 ----
-    if errors:
-        excel_row = idx + 2 + header_offset
-        col_idx = list(main_df.columns).index(main_col) + 1
-        ws.cell(excel_row, col_idx).fill = red_fill
+    # 5. === 快速写入 Excel 并标注 ===
+    wb = Workbook()
+    ws = wb.active
+    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
+    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
 
-    return errors
+    # a. 写入表头前的空行 (如果需要)
+    if header_offset > 0:
+        for _ in range(header_offset):
+            ws.append([""] * len(main_df.columns)) # 添加空行
+            
+    # b. 使用 dataframe_to_rows 快速写入表头 + 数据
+    for r in dataframe_to_rows(main_df.drop(columns=['__ROW_IDX__', '__KEY__']), index=False, header=True):
+        ws.append(r)
 
-# ========== 文件读取 ==========
+    # c. 准备坐标映射
+    original_cols_list = list(main_df.drop(columns=['__ROW_IDX__', '__KEY__']).columns)
+    col_name_to_idx = {name: i + 1 for i, name in enumerate(original_cols_list)}
+
+    # d. 标红错误单元格
+    for (row_idx, col_name) in errors_locations:
+        if col_name in col_name_to_idx:
+            excel_row = row_idx + 1 + header_offset + 1 # (row_idx 0-based) + (1 for header) + (offset) + (1 for 1-based)
+            excel_col = col_name_to_idx[col_name]
+            ws.cell(excel_row, excel_col).fill = red_fill
+            
+    # e. 标黄有错误的合同号
+    if contract_col_main in col_name_to_idx:
+        contract_col_excel_idx = col_name_to_idx[contract_col_main]
+        error_row_indices = merged_df[row_has_error]['__ROW_IDX__']
+        for row_idx in error_row_indices:
+            excel_row = row_idx + 1 + header_offset + 1
+            ws.cell(excel_row, contract_col_excel_idx).fill = yellow_fill
+
+    # 6. 导出
+    output_stream = BytesIO()
+    wb.save(output_stream)
+    output_stream.seek(0)
+    st.download_button(
+        label=f"📥 下载 {sheet_name} 审核标注版",
+        data=output_stream,
+        file_name=f"{sheet_name}_审核标注版.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"download_{sheet_name}" # 添加唯一的key
+    )
+
+    st.success(f"✅ {sheet_name} 审核完成，共发现 {total_errors} 处错误")
+    
+    # 返回原始的 main_df (不含 __KEY__), 用于漏填检测
+    return main_df.drop(columns=['__ROW_IDX__', '__KEY__']), total_errors
+
+# ========== 文件读取 & 预处理 ==========
 main_file = find_file(uploaded_files, "提成项目")
 ec_file = find_file(uploaded_files, "二次明细")
 fk_file = find_file(uploaded_files, "放款明细")
 product_file = find_file(uploaded_files, "产品台账")
 overdue_file = find_file(uploaded_files, "超期明细")
 
+st.info("ℹ️ 正在读取并预处理参考文件...")
+
+# 1. 加载所有参考 DF
 ec_df = pd.read_excel(ec_file)
 fk_xls = pd.ExcelFile(fk_file)
 fk_df = pd.read_excel(fk_xls, sheet_name=[s for s in fk_xls.sheet_names if "本司" in s][0])
@@ -174,92 +364,50 @@ overdue_df = pd.read_excel(overdue_file)
 commission_sheets = [s for s in fk_xls.sheet_names if "提成" in s]
 commission_df = pd.read_excel(fk_xls, sheet_name=commission_sheets[0]) if commission_sheets else None
 
-# ---- 其他sheet合同列 ----
+# ---- 找到所有参考表的合同列 ----
 contract_col_ec = find_col(ec_df, "合同")
 contract_col_fk = find_col(fk_df, "合同")
 contract_col_comm = find_col(commission_df, "合同") if commission_df is not None else None
 contract_col_product = find_col(product_df, "合同")
 contract_col_overdue = find_col(overdue_df, "合同")
 
-# ========== 审核函数 ==========
-def audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, commission_df, overdue_df):
-    xls_main = pd.ExcelFile(main_file)
-    global header_offset
-    header_row = get_header_row(main_file, sheet_name)
-    header_offset = header_row
-    main_df = pd.read_excel(xls_main, sheet_name=sheet_name, header=header_row)
-    st.write(f"📘 审核中：{sheet_name}（header={header_row}）")
+# 2. (新) 定义向量化映射规则
+# 格式: { "主表列名": [ (参考列表名, 比较类型, 容差, 乘数), ... ] }
+mapping_rules_vec = {
+    "起租日期": [
+        ("ref_ec_起租日_商", 'date', 0, 1),
+        ("ref_product_起租日_商", 'date', 0, 1)
+    ],
+    "租赁本金": [("ref_fk_租赁本金", 'num', 0, 1)],
+    "收益率": [("ref_product_XIRR_商_起租", 'num', 0.005, 1)],
+    "操作人": [("ref_fk_客户经理", 'text', 0, 1)],
+    "客户经理": [("ref_fk_客户经理", 'text', 0, 1)],
+    "产品": [("ref_product_产品名称_商", 'text', 0, 1)],
+    "城市经理": [("ref_overdue_城市经理", 'text', 0, 1)],
+}
 
-    contract_col_main = find_col(main_df, "合同")
-    if not contract_col_main:
-        st.error(f"❌ {sheet_name} 中未找到“合同”列，已跳过。")
-        return None, 0
+# 3. (新) 预处理所有参考 DF
+# 从 mapping_rules_vec 中提取所有需要的列
+ec_cols = ["起租日_商"]
+fk_cols = ["租赁本金", "客户经理"]
+product_cols = ["起租日_商", "XIRR_商_起租", "产品名称_商"]
+overdue_cols = ["城市经理"]
 
-    mapping_rules = {
-        "起租日期": [(ec_df, "起租日_商", contract_col_ec, 1, 0),
-                     (product_df, "起租日_商", contract_col_product, 1, 0)],
-        "租赁本金": [(fk_df, "租赁本金", contract_col_fk, 1, 0)],
-        "收益率": [(product_df, "XIRR_商_起租", contract_col_product, 1, 0.005)],
-        "操作人": [(fk_df, "客户经理", contract_col_fk, 1, 0)],
-        "客户经理": [(fk_df, "客户经理", contract_col_fk, 1, 0)],
-        "产品": [(product_df, "产品名称_商", contract_col_product, 1, 0)],
-        "城市经理": [(overdue_df, "城市经理", contract_col_overdue, 1, 0)],
-    }
+ec_std = prepare_one_ref_df(ec_df, contract_col_ec, ec_cols, "ec")
+fk_std = prepare_one_ref_df(fk_df, contract_col_fk, fk_cols, "fk")
+product_std = prepare_one_ref_df(product_df, contract_col_product, product_cols, "product")
+overdue_std = prepare_one_ref_df(overdue_df, contract_col_overdue, overdue_cols, "overdue")
 
-    wb = Workbook()
-    ws = wb.active
-    for c_idx, col_name in enumerate(main_df.columns, start=1):
-        ws.cell(1 + header_offset, c_idx, col_name)
+all_std_dfs = {
+    "ec": ec_std,
+    "fk": fk_std,
+    "product": product_std,
+    "overdue": overdue_std
+}
 
-    red_fill = PatternFill(start_color="FFC7CE", end_color="FFC7CE", fill_type="solid")
-    yellow_fill = PatternFill(start_color="FFFF00", end_color="FFFF00", fill_type="solid")
+st.success("✅ 参考文件预处理完成。")
 
-    total_errors = 0
-    n_rows = len(main_df)
-    progress = st.progress(0)
-    status = st.empty()
-
-    for idx, row in main_df.iterrows():
-        for main_kw, refs in mapping_rules.items():
-            actual_main_col = find_col(main_df, main_kw)
-            if not actual_main_col:
-                continue
-            for ref_df, ref_kw, ref_contract_col, mult, tol in refs:
-                if ref_df is None or ref_contract_col is None:
-                    continue
-                total_errors += compare_and_mark(
-                    idx, row, main_df, main_kw, ref_df, ref_kw,
-                    ref_contract_col, ws, red_fill,
-                    contract_col_main, ignore_tol=tol, multiplier=mult
-                )
-
-        progress.progress((idx + 1) / n_rows)
-        if (idx + 1) % 10 == 0 or idx + 1 == n_rows:
-            status.text(f"{sheet_name}：{idx + 1}/{n_rows} 行")
-
-    contract_col_idx_excel = list(main_df.columns).index(contract_col_main) + 1
-    for row_idx in range(len(main_df)):
-        excel_row = row_idx + 2 + header_offset
-        has_red = any(ws.cell(excel_row, c).fill == red_fill for c in range(1, len(main_df.columns) + 1))
-        if has_red:
-            ws.cell(excel_row, contract_col_idx_excel).fill = yellow_fill
-        for c_idx, val in enumerate(main_df.iloc[row_idx], start=1):
-            ws.cell(excel_row, c_idx, val)
-
-    output_stream = BytesIO()
-    wb.save(output_stream)
-    output_stream.seek(0)
-    st.download_button(
-        label=f"📥 下载 {sheet_name} 审核标注版",
-        data=output_stream,
-        file_name=f"{sheet_name}_审核标注版.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
-
-    st.success(f"✅ {sheet_name} 审核完成，共发现 {total_errors} 处错误")
-    return main_df, total_errors
-
-# ========== 执行主流程 ==========
+# ========== 执行主流程 (向量化) ==========
 xls_main = pd.ExcelFile(main_file)
 target_sheets = [
     s for s in xls_main.sheet_names
@@ -272,18 +420,25 @@ if not target_sheets:
     st.warning("⚠️ 未找到目标 sheet。")
 else:
     for sheet_name in target_sheets:
-        df, _ = audit_sheet(sheet_name, main_file, ec_df, fk_df, product_df, commission_df, overdue_df)
+        # (新) 调用向量化审核函数
+        df, _ = audit_sheet_vec(sheet_name, main_file, all_std_dfs, mapping_rules_vec)
+        
         if df is not None:
             col = find_col(df, "合同")
             if col:
-                all_contracts_in_sheets.update(str(c).strip() for c in df[col].dropna().unique())
+                # (新) 标准化合同号, 用于 set.update
+                normalized_contracts = normalize_contract_key(df[col].dropna())
+                all_contracts_in_sheets.update(normalized_contracts)
 
-    # ======= 新逻辑：使用“提成”sheet合同号检测漏填 =======
-    if commission_df is not None and contract_col_comm:
-        commission_contracts = set(str(c).strip() for c in commission_df[contract_col_comm].dropna().unique())
-        missing_contracts = sorted(list(commission_contracts - all_contracts_in_sheets))
+# ======= 新逻辑：使用“提成”sheet合同号检测漏填 =======
+if commission_df is not None and contract_col_comm:
+    # (新) 必须同样标准化提成表的合同号
+    commission_contracts = set(normalize_contract_key(commission_df[contract_col_comm].dropna()))
+    
+    missing_contracts = sorted(list(commission_contracts - all_contracts_in_sheets))
 
-        st.subheader("📋 合同漏填检测结果（基于提成sheet）")
+    st.subheader("📋 合同漏填检测结果（基于提成sheet）")
+    # ... (此后的漏填检测逻辑完全不变, 无需修改) ...
         st.write(f"共 {len(missing_contracts)} 个合同在六张表中未出现。")
 
         if missing_contracts:
